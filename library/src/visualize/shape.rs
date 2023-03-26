@@ -158,6 +158,7 @@ impl Layout for RectElem {
             self.inset(styles),
             self.outset(styles),
             self.radius(styles),
+            Vec::new(),
             self.span(),
         )
     }
@@ -268,6 +269,7 @@ impl Layout for SquareElem {
             self.inset(styles),
             self.outset(styles),
             self.radius(styles),
+            Vec::new(),
             self.span(),
         )
     }
@@ -350,6 +352,140 @@ impl Layout for EllipseElem {
             self.inset(styles),
             self.outset(styles),
             Corners::splat(Rel::zero()),
+            Vec::new(),
+            self.span(),
+        )
+    }
+}
+
+pub struct Vertex {
+    pub x: f64,
+    pub y: f64,
+}
+
+pub struct Vertices {
+    pub vals:  Vec<Vertex>,
+}
+
+impl Vertices {
+    pub const fn new(vals: Vec<Vertex>) -> Self {
+        Self {vals}
+    }
+}
+
+cast_from_value! {
+    Vertices,
+    s: EcoString => parse_vertices(&s)?
+}
+
+fn parse_vertices(vertice_str: &str) -> Result<Vertices, String> {
+    let mut vertices = Vec::new();
+    for vertice in vertice_str.split(";") {
+        let mut vertex_vals = Vec::new();
+        for val in vertice.split(",").map(|s| s.trim()) {
+            match val.parse::<f64>() {
+                Ok(v) => { vertex_vals.push(v); },
+                Err(e) => { return Err("float parse failure: ".to_string() + val); }, 
+            }
+        }
+        if vertex_vals.len() == 2 {
+            vertices.push(Vertex{x: vertex_vals[0], y: vertex_vals[1]});
+        } else {
+            return Err("a vertex has to have exactly 2 values".to_string());
+        }
+    }
+    Ok(Vertices::new(vertices))
+}
+
+
+
+
+/// A polygon with optional content
+///
+/// ## Example
+/// ```example
+/// // Without content.
+/// #polygon(width: 35%, height: 30pt)
+///
+/// // With content.
+/// #polygon[
+///   #set align(center)
+///   Automatically sized \
+///   to fit the content.
+/// ]
+/// ```
+///
+/// Display: Polygon
+/// Category: visualize
+#[element(Layout)]
+pub struct PolygonElem {
+    /// The polygon's width, relative to its parent container.
+    pub width: Smart<Rel<Length>>,
+
+    /// The polygon's height, relative to its parent container.
+    pub height: Smart<Rel<Length>>,
+
+    #[required]
+    #[parse(
+        let Spanned { v: vertices, span } = args.named::<Spanned<EcoString>>("path").unwrap().unwrap();
+        let _ = parse_vertices(&vertices).at(span)?;
+        vertices
+    )]
+    pub path: EcoString,
+
+    /// How to fill the polygon. See the
+    /// [rectangle's documentation]($func/rect.fill) for more details.
+    pub fill: Option<Paint>,
+
+    /// How to stroke the polygon. See the [rectangle's
+    /// documentation]($func/rect.stroke) for more details.
+    #[resolve]
+    #[fold]
+    pub stroke: Smart<Option<PartialStroke>>,
+
+    /// How much to pad the polygon's content. See the [rectangle's
+    /// documentation]($func/rect.inset) for more details.
+    ///
+    /// The default value is `{5pt}`.
+    #[resolve]
+    #[fold]
+    #[default(Sides::splat(Abs::pt(5.0).into()))]
+    pub inset: Sides<Option<Rel<Length>>>,
+
+    /// How much to expand the polygon's size without affecting the layout. See
+    /// the [rectangle's documentation]($func/rect.outset) for more details.
+    #[resolve]
+    #[fold]
+    pub outset: Sides<Option<Rel<Length>>>,
+
+    /// The content to place into the polygon.
+    ///
+    /// When this is omitted, the polygon takes on a default size of at most
+    /// `{45pt}` by `{30pt}`.
+    #[positional]
+    pub body: Option<Content>,
+}
+
+impl Layout for PolygonElem {
+    fn layout(
+        &self,
+        vt: &mut Vt,
+        styles: StyleChain,
+        regions: Regions,
+    ) -> SourceResult<Fragment> {
+        layout(
+            vt,
+            styles,
+            regions,
+            ShapeKind::Polygon,
+            &self.body(styles),
+            Axes::new(self.width(styles), self.height(styles)),
+            self.fill(styles),
+            self.stroke(styles).map(Sides::splat),
+            self.inset(styles),
+            self.outset(styles),
+            Corners::splat(Rel::zero()),
+            parse_vertices(&self.path()).unwrap().vals.iter().map(|v| Point::new(Abs::raw(v.x), Abs::raw(v.y)) ).collect(),
             self.span(),
         )
     }
@@ -457,6 +593,7 @@ impl Layout for CircleElem {
             self.inset(styles),
             self.outset(styles),
             Corners::splat(Rel::zero()),
+            Vec::new(),
             self.span(),
         )
     }
@@ -475,6 +612,7 @@ fn layout(
     mut inset: Sides<Rel<Abs>>,
     outset: Sides<Rel<Abs>>,
     radius: Corners<Rel<Abs>>,
+    vertices: Vec<Point>,
     span: Span,
 ) -> SourceResult<Fragment> {
     let resolved = sizing
@@ -530,6 +668,12 @@ fn layout(
             let pos = Point::new(-outset.left, -outset.top);
             let shape = ellipse(size, fill, stroke.left);
             frame.prepend(pos, FrameItem::Shape(shape, span));
+        } else if kind.is_polygonal() {
+            let outset = outset.relative_to(frame.size());
+            let size = frame.size() + outset.sum_by_axis();
+            let pos = Point::new(-outset.left, -outset.top);
+            let shape = polygon(size, vertices, fill, stroke.left);
+            frame.prepend(pos, FrameItem::Shape(shape, span));
         } else {
             frame.fill_and_stroke(fill, stroke, outset, radius, span);
         }
@@ -552,12 +696,18 @@ pub enum ShapeKind {
     Circle,
     /// A curve around two focal points.
     Ellipse,
+    /// A polygon with any number of vertices.
+    Polygon,
 }
 
 impl ShapeKind {
     /// Whether this shape kind is curvy.
     fn is_round(self) -> bool {
         matches!(self, Self::Circle | Self::Ellipse)
+    }
+
+    fn is_polygonal(self) -> bool {
+        matches!(self, Self::Polygon)
     }
 
     /// Whether this shape kind has equal side length.
