@@ -308,7 +308,12 @@ impl Counter {
         let offset = vt.introspector.query_before(self.selector(), location).len();
         let (mut state, page) = sequence[offset].clone();
         if self.is_page() {
-            let delta = vt.introspector.page(location).get() - page.get();
+            let delta;
+            if page.get() > vt.introspector.page(location).get() {
+                delta = 0;
+            } else {
+                delta = vt.introspector.page(location).get() - page.get();
+            }
             state.step(NonZeroUsize::ONE, delta);
         }
         Ok(state)
